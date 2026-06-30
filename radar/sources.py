@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 from radar.config import BENEFICIO_FRACO, CARGOS, CRESCIMENTO, NICHOS, PARCEIROS, SAUDE
 from radar.fetcher import Fetcher
@@ -9,37 +10,78 @@ from radar.models import Lead
 from radar.text_utils import clean_name, emails, has_any, phones
 
 
-def queries(source: str, city: str, uf: str) -> list[tuple[str, str]]:
-    items: list[tuple[str, str]] = []
+MAGE_PIABETA_REGION = [
+    "Piabetá",
+    "Magé",
+    "Fragoso",
+    "Vila Inhomirim",
+    "Raiz da Serra",
+    "Pau Grande",
+    "Santo Aleixo",
+    "Parada Angélica",
+    "Jardim Nazareno",
+    "Parque Caçula",
+    "Bongaba",
+    "Guia de Pacobaíba",
+    "Mauá",
+    "Suruí",
+]
+
+
+def _norm(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return value.lower().strip()
+
+
+def region_terms(city: str) -> list[str]:
+    city_n = _norm(city)
+    if city_n in {"mage", "piabeta", "vila inhomirim", "fragoso", "raiz da serra", "pau grande"}:
+        terms = [city]
+        for place in MAGE_PIABETA_REGION:
+            if _norm(place) != city_n:
+                terms.append(place)
+        return terms
+    return [city]
+
+
+def queries(source: str, city: str, uf: str) -> list[tuple[str, str, str]]:
+    items: list[tuple[str, str, str]] = []
+    places = region_terms(city)
     if source == "vagas":
-        for cargo in CARGOS:
-            items += [
-                (f'site:gupy.io "{cargo}" "{city}" {uf} "benefícios"', cargo),
-                (f'"{cargo}" "{city}" {uf} "CLT" "benefícios" "vaga"', cargo),
-                (f'"{cargo}" "{city}" {uf} "vale transporte" "vaga"', cargo),
-            ]
+        for place in places:
+            for cargo in CARGOS:
+                items += [
+                    (f'site:gupy.io "{cargo}" "{place}" {uf} "benefícios"', cargo, place),
+                    (f'"{cargo}" "{place}" {uf} "CLT" "benefícios" "vaga"', cargo, place),
+                    (f'"{cargo}" "{place}" {uf} "vale transporte" "vaga"', cargo, place),
+                ]
     elif source == "contadores":
-        items = [
-            (f'"escritório contábil" "{city}" {uf} "WhatsApp"', "escritório contábil"),
-            (f'"contabilidade" "{city}" {uf} "abertura de empresa"', "escritório contábil"),
-            (f'"contabilidade" "{city}" {uf} "folha de pagamento"', "escritório contábil"),
-            (f'"contador" "{city}" {uf} "departamento pessoal"', "escritório contábil"),
-        ]
+        for place in places:
+            items += [
+                (f'"escritório contábil" "{place}" {uf} "WhatsApp"', "escritório contábil", place),
+                (f'"contabilidade" "{place}" {uf} "abertura de empresa"', "escritório contábil", place),
+                (f'"contabilidade" "{place}" {uf} "folha de pagamento"', "escritório contábil", place),
+                (f'"contador" "{place}" {uf} "departamento pessoal"', "escritório contábil", place),
+            ]
     elif source == "nichos":
-        for nicho in NICHOS:
-            items += [
-                (f'"{nicho}" "{city}" {uf} "WhatsApp"', nicho),
-                (f'"{nicho}" "{city}" {uf} "equipe"', nicho),
-                (f'"{nicho}" "{city}" {uf} "trabalhe conosco"', nicho),
-            ]
+        for place in places:
+            for nicho in NICHOS:
+                items += [
+                    (f'"{nicho}" "{place}" {uf} "WhatsApp"', nicho, place),
+                    (f'"{nicho}" "{place}" {uf} "equipe"', nicho, place),
+                    (f'"{nicho}" "{place}" {uf} "trabalhe conosco"', nicho, place),
+                ]
     elif source == "crescimento":
-        items = [(f'"{term}" "{city}" empresa {uf}', "sinal de crescimento") for term in CRESCIMENTO]
+        for place in places:
+            items += [(f'"{term}" "{place}" empresa {uf}', "sinal de crescimento", place) for term in CRESCIMENTO]
     elif source == "parceiros":
-        for parceiro in PARCEIROS:
-            items += [
-                (f'"{parceiro}" "{city}" {uf} "empresas"', parceiro),
-                (f'"{parceiro}" "{city}" {uf} "WhatsApp"', parceiro),
-            ]
+        for place in places:
+            for parceiro in PARCEIROS:
+                items += [
+                    (f'"{parceiro}" "{place}" {uf} "empresas"', parceiro, place),
+                    (f'"{parceiro}" "{place}" {uf} "WhatsApp"', parceiro, place),
+                ]
     return items
 
 
@@ -48,25 +90,35 @@ def _is_local_result(city: str, uf: str, text: str, url: str) -> bool:
     if not strict:
         return True
 
-    haystack = f"{text} {url}".lower()
-    city_l = city.lower()
-    uf_l = uf.lower()
+    haystack = _norm(f"{text} {url}")
+    places = [_norm(place) for place in region_terms(city)]
+    uf_l = _norm(uf)
 
-    if city_l in haystack:
-        return True
-    if f"/{city_l.replace(' ', '-')}" in haystack or city_l.replace(' ', '-') in haystack:
-        return True
+    for place in places:
+        if place and place in haystack:
+            return True
+        if place and place.replace(" ", "-") in haystack:
+            return True
     if uf_l == "rj" and re.search(r"\b(?:21|\+55\s*21)\b", haystack):
         return True
     return False
 
 
+def _matched_place(city: str, text: str, url: str) -> str:
+    haystack = _norm(f"{text} {url}")
+    for place in region_terms(city):
+        place_n = _norm(place)
+        if place_n in haystack or place_n.replace(" ", "-") in haystack:
+            return place
+    return city
+
+
 def collect_source(source: str, city: str, uf: str, limit: int, fetcher: Fetcher) -> list[Lead]:
     leads: list[Lead] = []
-    max_queries = int(os.getenv("RADAR_MAX_QUERIES_PER_SOURCE", "8"))
+    max_queries = int(os.getenv("RADAR_MAX_QUERIES_PER_SOURCE", "16"))
     search_limit = int(os.getenv("RADAR_RESULTS_PER_QUERY", "5"))
 
-    for query, segment in queries(source, city, uf)[:max_queries]:
+    for query, segment, place_query in queries(source, city, uf)[:max_queries]:
         if fetcher.debug:
             print(f"[radar] query {source}: {query}")
         for result in fetcher.search(query, limit=search_limit):
@@ -74,11 +126,12 @@ def collect_source(source: str, city: str, uf: str, limit: int, fetcher: Fetcher
             full = f"{result.title} {result.snippet} {page_text}"
             if not _is_local_result(city, uf, full, result.url):
                 if fetcher.debug:
-                    print(f"[radar] descartado fora da cidade: {result.title[:90]}")
+                    print(f"[radar] descartado fora da região: {result.title[:90]}")
                 continue
             found_phones = phones(full)
             found_emails = emails(full)
-            tags = [source, segment, f"busca:{result.provider or 'desconhecido'}", "local_confirmado"]
+            place_found = _matched_place(city, full, result.url)
+            tags = [source, segment, f"local:{place_found}", f"busca:{result.provider or 'desconhecido'}", "local_confirmado"]
             if source == "vagas":
                 tags.append("contratando")
                 if not has_any(full, SAUDE):
@@ -99,7 +152,7 @@ def collect_source(source: str, city: str, uf: str, limit: int, fetcher: Fetcher
             leads.append(Lead(
                 source=source,
                 name=clean_name(result.title),
-                city=city,
+                city=place_found,
                 uf=uf,
                 url=result.url,
                 title=result.title[:160],
@@ -110,7 +163,7 @@ def collect_source(source: str, city: str, uf: str, limit: int, fetcher: Fetcher
                 email=found_emails[0] if found_emails else "",
                 tags=tags,
                 evidence=[result.snippet[:240]],
-                raw={"query": query, "provider": result.provider},
+                raw={"query": query, "provider": result.provider, "place_query": place_query},
             ))
             if len(leads) >= limit:
                 return leads
