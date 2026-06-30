@@ -111,14 +111,50 @@ class BingProvider(SearchProvider):
     name = "bing"
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
+        # O RSS do Bing é bem mais estável para automação simples que o HTML.
+        results = self._search_rss(query, limit)
+        if results:
+            self._debug(query, len(results))
+            return results
+        results = self._search_html(query, limit)
+        self._debug(query, len(results))
+        return results
+
+    def _search_rss(self, query: str, limit: int) -> list[SearchResult]:
+        endpoint = "https://www.bing.com/search"
+        try:
+            response = self.session.get(
+                endpoint,
+                params={"q": query, "format": "rss", "cc": "br", "setlang": "pt-BR"},
+                timeout=self.timeout,
+            )
+            self.last_status = f"RSS HTTP {response.status_code} ({len(response.text)} bytes)"
+            response.raise_for_status()
+        except Exception as exc:
+            self.last_status = f"RSS erro: {exc}"
+            return []
+
+        soup = BeautifulSoup(response.text, "xml")
+        results: list[SearchResult] = []
+        for item in soup.find_all("item"):
+            title = item.title.get_text(" ", strip=True) if item.title else ""
+            link = item.link.get_text(" ", strip=True) if item.link else ""
+            snippet = item.description.get_text(" ", strip=True) if item.description else ""
+            href = _unwrap_bing_url(link)
+            if self._valid_result(title, href):
+                results.append(SearchResult(title=title, url=href, snippet=snippet, provider=self.name))
+            if len(results) >= limit:
+                break
+        return results
+
+    def _search_html(self, query: str, limit: int) -> list[SearchResult]:
         endpoint = "https://www.bing.com/search"
         try:
             response = self.session.get(endpoint, params={"q": query, "cc": "br", "setlang": "pt-BR"}, timeout=self.timeout)
-            self.last_status = f"HTTP {response.status_code} ({len(response.text)} bytes)"
+            self.last_status = f"HTML HTTP {response.status_code} ({len(response.text)} bytes)"
             response.raise_for_status()
         except Exception as exc:
-            self.last_status = f"erro: {exc}"
-            self._debug(query, 0)
+            self.last_status = f"HTML erro: {exc}"
             return []
 
         time.sleep(self.sleep)
@@ -135,7 +171,6 @@ class BingProvider(SearchProvider):
         if not results:
             results = self._fallback_links(soup, limit)
 
-        self._debug(query, len(results))
         return results
 
     def _parse_bing_item(self, item) -> SearchResult | None:
