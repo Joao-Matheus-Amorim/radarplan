@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from radar.core import DEFAULT_SOURCES, add_feedback, export_csv, init_project, prospectar, run_and_export
+from radar.fetcher import Fetcher
 
 
 def main():
@@ -11,6 +12,10 @@ def main():
     sub.add_parser("init")
     sub.add_parser("sources")
 
+    p = sub.add_parser("search-test")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, default=5)
+
     p = sub.add_parser("prospectar")
     p.add_argument("--cidade", required=True)
     p.add_argument("--uf", required=True)
@@ -18,6 +23,7 @@ def main():
     p.add_argument("--por-fonte", type=int, default=20)
     p.add_argument("--fila", type=int, default=30)
     p.add_argument("--ia", action="store_true")
+    p.add_argument("--debug", action="store_true")
 
     p = sub.add_parser("fonte")
     p.add_argument("tipo", choices=DEFAULT_SOURCES)
@@ -25,6 +31,7 @@ def main():
     p.add_argument("--uf", required=True)
     p.add_argument("--limite", type=int, default=30)
     p.add_argument("--ia", action="store_true")
+    p.add_argument("--debug", action="store_true")
 
     p = sub.add_parser("feedback")
     p.add_argument("--empresa", required=True)
@@ -43,13 +50,19 @@ def main():
         print("Fontes disponíveis:")
         for source in DEFAULT_SOURCES:
             print(f"- {source}")
+    elif args.cmd == "search-test":
+        fetcher = Fetcher(debug=True)
+        results = fetcher.search(args.query, args.limit)
+        print(f"Resultados encontrados: {len(results)}")
+        for index, result in enumerate(results, 1):
+            print(f"{index}. {result.title}\n   {result.url}\n   {result.snippet[:180]}")
     elif args.cmd == "prospectar":
         sources = args.sources.split(",") if args.sources else None
-        raw, final, count = run_and_export(args.cidade, args.uf, sources, args.por_fonte, args.fila, args.ia)
+        raw, final, count = run_and_export(args.cidade, args.uf, sources, args.por_fonte, args.fila, args.ia, args.debug)
         print(f"Prospecção bruta: {raw}")
         print(f"Fila do dia: {final} ({count} leads)")
     elif args.cmd == "fonte":
-        leads = prospectar(args.cidade, args.uf, [args.tipo], args.limite, args.ia)
+        leads = prospectar(args.cidade, args.uf, [args.tipo], args.limite, args.ia, args.debug)
         path = export_csv(leads, f"exports/{args.tipo}_{args.cidade}_{args.uf}.csv")
         print(f"Exportado: {path} ({len(leads)} leads)")
     elif args.cmd == "feedback":
