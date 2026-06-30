@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from radar.config import BENEFICIO_FRACO, CARGOS, CRESCIMENTO, NICHOS, PARCEIROS, SAUDE
 from radar.fetcher import Fetcher
@@ -14,38 +15,56 @@ def queries(source: str, city: str, uf: str) -> list[tuple[str, str]]:
         for cargo in CARGOS:
             items += [
                 (f'site:gupy.io "{cargo}" "{city}" {uf} "benefícios"', cargo),
-                (f'"{cargo}" "{city}" "CLT" "benefícios" "vaga"', cargo),
-                (f'"{cargo}" "{city}" "vale transporte" "vaga"', cargo),
+                (f'"{cargo}" "{city}" {uf} "CLT" "benefícios" "vaga"', cargo),
+                (f'"{cargo}" "{city}" {uf} "vale transporte" "vaga"', cargo),
             ]
     elif source == "contadores":
         items = [
-            (f'"escritório contábil" "{city}" "WhatsApp"', "escritório contábil"),
-            (f'"contabilidade" "{city}" "abertura de empresa"', "escritório contábil"),
-            (f'"contabilidade" "{city}" "folha de pagamento"', "escritório contábil"),
-            (f'"contador" "{city}" "departamento pessoal"', "escritório contábil"),
+            (f'"escritório contábil" "{city}" {uf} "WhatsApp"', "escritório contábil"),
+            (f'"contabilidade" "{city}" {uf} "abertura de empresa"', "escritório contábil"),
+            (f'"contabilidade" "{city}" {uf} "folha de pagamento"', "escritório contábil"),
+            (f'"contador" "{city}" {uf} "departamento pessoal"', "escritório contábil"),
         ]
     elif source == "nichos":
         for nicho in NICHOS:
             items += [
-                (f'"{nicho}" "{city}" "WhatsApp"', nicho),
-                (f'"{nicho}" "{city}" "equipe"', nicho),
-                (f'"{nicho}" "{city}" "trabalhe conosco"', nicho),
+                (f'"{nicho}" "{city}" {uf} "WhatsApp"', nicho),
+                (f'"{nicho}" "{city}" {uf} "equipe"', nicho),
+                (f'"{nicho}" "{city}" {uf} "trabalhe conosco"', nicho),
             ]
     elif source == "crescimento":
         items = [(f'"{term}" "{city}" empresa {uf}', "sinal de crescimento") for term in CRESCIMENTO]
     elif source == "parceiros":
         for parceiro in PARCEIROS:
             items += [
-                (f'"{parceiro}" "{city}" "empresas"', parceiro),
-                (f'"{parceiro}" "{city}" "WhatsApp"', parceiro),
+                (f'"{parceiro}" "{city}" {uf} "empresas"', parceiro),
+                (f'"{parceiro}" "{city}" {uf} "WhatsApp"', parceiro),
             ]
     return items
 
 
+def _is_local_result(city: str, uf: str, text: str, url: str) -> bool:
+    strict = os.getenv("RADAR_STRICT_CITY", "1") == "1"
+    if not strict:
+        return True
+
+    haystack = f"{text} {url}".lower()
+    city_l = city.lower()
+    uf_l = uf.lower()
+
+    if city_l in haystack:
+        return True
+    if f"/{city_l.replace(' ', '-')}" in haystack or city_l.replace(' ', '-') in haystack:
+        return True
+    if uf_l == "rj" and re.search(r"\b(?:21|\+55\s*21)\b", haystack):
+        return True
+    return False
+
+
 def collect_source(source: str, city: str, uf: str, limit: int, fetcher: Fetcher) -> list[Lead]:
     leads: list[Lead] = []
-    max_queries = int(os.getenv("RADAR_MAX_QUERIES_PER_SOURCE", "6"))
-    search_limit = int(os.getenv("RADAR_RESULTS_PER_QUERY", "3"))
+    max_queries = int(os.getenv("RADAR_MAX_QUERIES_PER_SOURCE", "8"))
+    search_limit = int(os.getenv("RADAR_RESULTS_PER_QUERY", "5"))
 
     for query, segment in queries(source, city, uf)[:max_queries]:
         if fetcher.debug:
@@ -53,9 +72,13 @@ def collect_source(source: str, city: str, uf: str, limit: int, fetcher: Fetcher
         for result in fetcher.search(query, limit=search_limit):
             page_text = fetcher.text(result.url)
             full = f"{result.title} {result.snippet} {page_text}"
+            if not _is_local_result(city, uf, full, result.url):
+                if fetcher.debug:
+                    print(f"[radar] descartado fora da cidade: {result.title[:90]}")
+                continue
             found_phones = phones(full)
             found_emails = emails(full)
-            tags = [source, segment, f"busca:{result.provider or 'desconhecido'}"]
+            tags = [source, segment, f"busca:{result.provider or 'desconhecido'}", "local_confirmado"]
             if source == "vagas":
                 tags.append("contratando")
                 if not has_any(full, SAUDE):
