@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import html
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -74,6 +76,12 @@ def _unwrap_bing_url(href: str) -> str:
     return href
 
 
+def _strip_html(value: str) -> str:
+    if not value:
+        return ""
+    return BeautifulSoup(html.unescape(value), "html.parser").get_text(" ", strip=True)
+
+
 class DuckDuckGoProvider(SearchProvider):
     name = "duckduckgo"
 
@@ -111,7 +119,6 @@ class BingProvider(SearchProvider):
     name = "bing"
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
-        # O RSS do Bing é bem mais estável para automação simples que o HTML.
         results = self._search_rss(query, limit)
         if results:
             self._debug(query, len(results))
@@ -134,12 +141,17 @@ class BingProvider(SearchProvider):
             self.last_status = f"RSS erro: {exc}"
             return []
 
-        soup = BeautifulSoup(response.text, "xml")
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            self.last_status = f"RSS parse erro: {exc} ({len(response.text)} bytes)"
+            return []
+
         results: list[SearchResult] = []
-        for item in soup.find_all("item"):
-            title = item.title.get_text(" ", strip=True) if item.title else ""
-            link = item.link.get_text(" ", strip=True) if item.link else ""
-            snippet = item.description.get_text(" ", strip=True) if item.description else ""
+        for item in root.findall(".//item"):
+            title = _strip_html(item.findtext("title", ""))
+            link = item.findtext("link", "") or ""
+            snippet = _strip_html(item.findtext("description", ""))
             href = _unwrap_bing_url(link)
             if self._valid_result(title, href):
                 results.append(SearchResult(title=title, url=href, snippet=snippet, provider=self.name))
