@@ -4,5 +4,5 @@ __pycache__/
 *.sqlite3
 exports/*.csv
 exports/*.txt
+!exports/.gitkeep
 .env
-.DS_Store
