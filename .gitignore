@@ -6,3 +6,8 @@ exports/*.csv
 exports/*.txt
 !exports/.gitkeep
 .env
+data/google_browser_debug.html
+data/google_browser_profile/
+data/google_cache/
+data/osm_cache.json
+google_odontologia_piabeta.txt

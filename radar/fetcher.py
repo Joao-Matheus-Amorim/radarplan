@@ -658,8 +658,11 @@ class Fetcher:
                 "Cache-Control": "no-cache",
             }
         )
+        from radar.google_browser import GoogleBrowserProvider
+
         available: dict[str, SearchProvider] = {
             "google": GoogleProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
+            "google_browser": GoogleBrowserProvider(debug),
             "duckduckgo": DuckDuckGoProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
             "bing": BingProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
             "yahoo": YahooProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
