@@ -8,8 +8,8 @@ from radar.scoring import dedupe, score
 from radar.sources import collect_source
 
 
-def prospectar(city: str, uf: str, sources: list[str] | None = None, per_source: int = 20, use_ai: bool = False):
-    fetcher = Fetcher()
+def prospectar(city: str, uf: str, sources: list[str] | None = None, per_source: int = 20, use_ai: bool = False, debug: bool = False):
+    fetcher = Fetcher(debug=debug)
     leads = []
     for source in sources or DEFAULT_SOURCES:
         source = source.strip().lower()
@@ -18,6 +18,8 @@ def prospectar(city: str, uf: str, sources: list[str] | None = None, per_source:
         print(f"[radar] Coletando fonte: {source}")
         chunk = collect_source(source, city, uf, per_source, fetcher)
         print(f"[radar] {source}: {len(chunk)} candidatos")
+        if debug and not chunk:
+            print(f"[debug-search] Último status: {fetcher.last_status or 'sem resposta registrada'}")
         leads.extend(chunk)
     leads = sorted([score(lead) for lead in dedupe(leads)], key=lambda lead: lead.score, reverse=True)
     if use_ai:
@@ -26,8 +28,8 @@ def prospectar(city: str, uf: str, sources: list[str] | None = None, per_source:
     return leads
 
 
-def run_and_export(city: str, uf: str, sources: list[str] | None = None, per_source: int = 20, fila: int = 30, use_ai: bool = False):
-    leads = prospectar(city, uf, sources, per_source, use_ai)
+def run_and_export(city: str, uf: str, sources: list[str] | None = None, per_source: int = 20, fila: int = 30, use_ai: bool = False, debug: bool = False):
+    leads = prospectar(city, uf, sources, per_source, use_ai, debug)
     raw = export_csv(leads, "exports/resultados_prospeccao_bruta.csv")
     final = export_csv(leads[:fila], "exports/fila_do_dia.csv")
     return str(raw), str(final), len(leads[:fila])
