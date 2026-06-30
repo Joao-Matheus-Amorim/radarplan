@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from radar.config import BENEFICIO_FRACO, CARGOS, CRESCIMENTO, NICHOS, PARCEIROS, SAUDE
 from radar.fetcher import Fetcher
 from radar.models import Lead
@@ -42,12 +44,18 @@ def queries(source: str, city: str, uf: str) -> list[tuple[str, str]]:
 
 def collect_source(source: str, city: str, uf: str, limit: int, fetcher: Fetcher) -> list[Lead]:
     leads: list[Lead] = []
-    for query, segment in queries(source, city, uf):
-        for result in fetcher.search(query, limit=5):
-            full = f"{result.title} {result.snippet} {fetcher.text(result.url)}"
+    max_queries = int(os.getenv("RADAR_MAX_QUERIES_PER_SOURCE", "6"))
+    search_limit = int(os.getenv("RADAR_RESULTS_PER_QUERY", "3"))
+
+    for query, segment in queries(source, city, uf)[:max_queries]:
+        if fetcher.debug:
+            print(f"[radar] query {source}: {query}")
+        for result in fetcher.search(query, limit=search_limit):
+            page_text = fetcher.text(result.url)
+            full = f"{result.title} {result.snippet} {page_text}"
             found_phones = phones(full)
             found_emails = emails(full)
-            tags = [source, segment]
+            tags = [source, segment, f"busca:{result.provider or 'desconhecido'}"]
             if source == "vagas":
                 tags.append("contratando")
                 if not has_any(full, SAUDE):
@@ -79,7 +87,7 @@ def collect_source(source: str, city: str, uf: str, limit: int, fetcher: Fetcher
                 email=found_emails[0] if found_emails else "",
                 tags=tags,
                 evidence=[result.snippet[:240]],
-                raw={"query": query},
+                raw={"query": query, "provider": result.provider},
             ))
             if len(leads) >= limit:
                 return leads
