@@ -24,12 +24,17 @@ class SearchResult:
 class SearchProvider:
     name = "base"
 
-    def __init__(self, session: requests.Session, timeout: int, sleep: float, debug: bool = False):
+    def __init__(self, session: requests.Session, connect_timeout: int, read_timeout: int, sleep: float, debug: bool = False):
         self.session = session
-        self.timeout = timeout
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
         self.sleep = sleep
         self.debug = debug
         self.last_status = ""
+
+    @property
+    def timeout(self) -> tuple[int, int]:
+        return (self.connect_timeout, self.read_timeout)
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
         raise NotImplementedError
@@ -75,7 +80,7 @@ class DuckDuckGoProvider(SearchProvider):
     def search(self, query: str, limit: int) -> list[SearchResult]:
         endpoint = "https://html.duckduckgo.com/html/"
         try:
-            response = self.session.get(endpoint, params={"q": query, "kl": "br-pt"}, timeout=(3, self.timeout))
+            response = self.session.get(endpoint, params={"q": query, "kl": "br-pt"}, timeout=self.timeout)
             self.last_status = f"HTTP {response.status_code} ({len(response.text)} bytes)"
             response.raise_for_status()
         except Exception as exc:
@@ -108,7 +113,7 @@ class BingProvider(SearchProvider):
     def search(self, query: str, limit: int) -> list[SearchResult]:
         endpoint = "https://www.bing.com/search"
         try:
-            response = self.session.get(endpoint, params={"q": query, "cc": "br", "setlang": "pt-BR"}, timeout=(3, self.timeout))
+            response = self.session.get(endpoint, params={"q": query, "cc": "br", "setlang": "pt-BR"}, timeout=self.timeout)
             self.last_status = f"HTTP {response.status_code} ({len(response.text)} bytes)"
             response.raise_for_status()
         except Exception as exc:
@@ -170,8 +175,8 @@ class BingProvider(SearchProvider):
 class SearxProvider(SearchProvider):
     name = "searxng"
 
-    def __init__(self, session: requests.Session, timeout: int, sleep: float, debug: bool = False, base_url: str = ""):
-        super().__init__(session, timeout, sleep, debug)
+    def __init__(self, session: requests.Session, connect_timeout: int, read_timeout: int, sleep: float, debug: bool = False, base_url: str = ""):
+        super().__init__(session, connect_timeout, read_timeout, sleep, debug)
         self.base_url = (base_url or "").rstrip("/")
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
@@ -180,7 +185,7 @@ class SearxProvider(SearchProvider):
             return []
         endpoint = f"{self.base_url}/search"
         try:
-            response = self.session.get(endpoint, params={"q": query, "format": "json", "language": "pt-BR"}, timeout=(3, self.timeout))
+            response = self.session.get(endpoint, params={"q": query, "format": "json", "language": "pt-BR"}, timeout=self.timeout)
             self.last_status = f"HTTP {response.status_code} ({len(response.text)} bytes)"
             response.raise_for_status()
             data = response.json()
@@ -204,11 +209,13 @@ class SearxProvider(SearchProvider):
 
 
 class Fetcher:
-    def __init__(self, timeout: int = 6, sleep: float = 0.15, debug: bool = False):
+    def __init__(self, timeout: int = 12, sleep: float = 0.15, debug: bool = False):
+        self.connect_timeout = int(os.getenv("RADAR_CONNECT_TIMEOUT", "5"))
         self.timeout = int(os.getenv("RADAR_TIMEOUT", str(timeout)))
         self.sleep = float(os.getenv("RADAR_SLEEP", str(sleep)))
         self.debug = debug
         self.deep_fetch = os.getenv("RADAR_DEEP_FETCH", "0") == "1"
+        provider_names = [p.strip().lower() for p in os.getenv("RADAR_PROVIDERS", "bing,duckduckgo,searxng").split(",") if p.strip()]
         self.last_status = ""
         self.session = requests.Session()
         self.session.headers.update({
@@ -216,11 +223,12 @@ class Fetcher:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
         })
-        self.providers: list[SearchProvider] = [
-            DuckDuckGoProvider(self.session, self.timeout, self.sleep, debug),
-            BingProvider(self.session, self.timeout, self.sleep, debug),
-            SearxProvider(self.session, self.timeout, self.sleep, debug, os.getenv("RADAR_SEARX_URL", "")),
-        ]
+        available: dict[str, SearchProvider] = {
+            "duckduckgo": DuckDuckGoProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
+            "bing": BingProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
+            "searxng": SearxProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug, os.getenv("RADAR_SEARX_URL", "")),
+        }
+        self.providers = [available[name] for name in provider_names if name in available]
 
     def search(self, query: str, limit: int = 10) -> list[SearchResult]:
         seen: set[str] = set()
@@ -248,7 +256,7 @@ class Fetcher:
         if not self.deep_fetch:
             return ""
         try:
-            response = self.session.get(url, timeout=(3, self.timeout))
+            response = self.session.get(url, timeout=(self.connect_timeout, self.timeout))
             if response.status_code >= 400:
                 return ""
             if "pdf" in response.headers.get("content-type", "").lower():
