@@ -6,6 +6,8 @@ from pathlib import Path
 from radar.core import DEFAULT_SOURCES, add_feedback, export_csv, init_project, prospectar, run_and_export
 from radar.fetcher import Fetcher
 from radar.google_importer import import_google_file
+from radar.sources import qualify_result
+from radar.text_utils import emails, phones
 
 
 def _parse_sources(value: str | None) -> list[str] | None:
@@ -50,6 +52,56 @@ def _cmd_search_test(args: argparse.Namespace) -> None:
 
     if fetcher.last_status:
         print(f"Status: {fetcher.last_status}")
+
+
+def _cmd_lead_test(args: argparse.Namespace) -> None:
+    query = " ".join(args.query)
+    fetcher = Fetcher(debug=True)
+    results = fetcher.search(query, args.limit)
+
+    print(f"Query usada: {query}")
+    print(f"Suspeitos encontrados: {len(results)}")
+
+    approved = 0
+    rejected = 0
+
+    for index, result in enumerate(results, 1):
+        page_text = fetcher.text(result.url)
+        full_text = f"{result.title} {result.snippet} {page_text}"
+
+        quality = qualify_result(
+            result=result,
+            city=args.cidade,
+            uf=args.uf,
+            segment=args.segmento,
+            source=args.source,
+            full_text=full_text,
+        )
+
+        status = "APROVADO" if quality["accepted"] else "REJEITADO"
+
+        if quality["accepted"]:
+            approved += 1
+        else:
+            rejected += 1
+
+        print("")
+        print(f"[{index}] {status} | score={quality['score']}")
+        print(f"Nome: {result.title}")
+        print(f"URL: {result.url}")
+        print(f"Motivos: {', '.join(quality['reasons'])}")
+
+        found_phones = phones(full_text)
+        found_emails = emails(full_text)
+
+        if found_phones:
+            print(f"Telefones: {', '.join(found_phones[:3])}")
+
+        if found_emails:
+            print(f"E-mails: {', '.join(found_emails[:3])}")
+
+    print("")
+    print(f"Resumo: {approved} aprovados, {rejected} rejeitados")
 
 
 def _cmd_prospectar(args: argparse.Namespace) -> None:
@@ -138,13 +190,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query", nargs="+", help="Query de busca. Pode vir quebrada em várias palavras.")
     p.add_argument("--limit", type=int, default=5)
 
+    p = sub.add_parser("lead-test")
+    p.add_argument("query", nargs="+", help="Query de busca. Pode vir quebrada em várias palavras.")
+    p.add_argument("--cidade", required=True)
+    p.add_argument("--uf", required=True)
+    p.add_argument("--segmento", required=True)
+    p.add_argument("--source", default="manual")
+    p.add_argument("--limit", type=int, default=10)
+
     p = sub.add_parser("prospectar")
     p.add_argument("--cidade", required=True)
     p.add_argument("--uf", required=True)
     p.add_argument("--sources", help="vagas,contadores,nichos,crescimento,parceiros")
     p.add_argument("--por-fonte", type=int, default=20)
     p.add_argument("--fila", type=int, default=30)
-    p.add_argument("--ia", action="store_true")
+    p.add_argument("--ia", "--ai", dest="ia", action="store_true")
     p.add_argument("--debug", action="store_true")
 
     p = sub.add_parser("fonte")
@@ -152,11 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cidade", required=True)
     p.add_argument("--uf", required=True)
     p.add_argument("--limite", type=int, default=30)
-    p.add_argument("--ia", action="store_true")
+    p.add_argument("--ia", "--ai", dest="ia", action="store_true")
     p.add_argument("--debug", action="store_true")
 
     p = sub.add_parser("importar-google", help="Importa TXT/HTML copiado do Google e transforma em leads com fingerprint.")
-    p.add_argument("arquivo", help="Arquivo .txt, .html ou .htm salvo/copiadо do Google.")
+    p.add_argument("arquivo", help="Arquivo .txt, .html ou .htm salvo/copiado do Google.")
     p.add_argument("--cidade", required=True)
     p.add_argument("--uf", required=True)
     p.add_argument("--segmento", required=True)
@@ -188,6 +248,8 @@ def main() -> None:
         _cmd_sources()
     elif args.cmd == "search-test":
         _cmd_search_test(args)
+    elif args.cmd == "lead-test":
+        _cmd_lead_test(args)
     elif args.cmd == "prospectar":
         _cmd_prospectar(args)
     elif args.cmd == "fonte":
