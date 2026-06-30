@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from urllib.parse import urlencode
+from urllib.parse import unwrap as _noop
 
 import requests
 from bs4 import BeautifulSoup
@@ -41,33 +41,26 @@ class SearchProvider:
 
     def _debug(self, query: str, count: int) -> None:
         if self.debug:
-            print(f"[debug-search:{self.name}] {self.last_status} | query={query!r} | resultados={count}")
+            print(f"[debug-search:{self.name}] {self.last_status} | resultados={count} | {query[:90]!r}")
 
 
 class DuckDuckGoProvider(SearchProvider):
     name = "duckduckgo"
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
-        for endpoint in ("https://html.duckduckgo.com/html/", "https://duckduckgo.com/html/"):
-            results = self._search_endpoint(endpoint, query, limit)
-            if results:
-                return results
-        return []
-
-    def _search_endpoint(self, endpoint: str, query: str, limit: int) -> list[SearchResult]:
+        endpoint = "https://html.duckduckgo.com/html/"
         try:
-            response = self.session.get(endpoint, params={"q": query, "kl": "br-pt"}, timeout=self.timeout)
-            self.last_status = f"{endpoint} -> HTTP {response.status_code} ({len(response.text)} bytes)"
+            response = self.session.get(endpoint, params={"q": query, "kl": "br-pt"}, timeout=(3, self.timeout))
+            self.last_status = f"HTTP {response.status_code} ({len(response.text)} bytes)"
             response.raise_for_status()
         except Exception as exc:
-            self.last_status = f"{endpoint} -> erro: {exc}"
+            self.last_status = f"erro: {exc}"
             self._debug(query, 0)
             return []
 
         time.sleep(self.sleep)
         soup = BeautifulSoup(response.text, "html.parser")
         results: list[SearchResult] = []
-
         for item in soup.select(".result"):
             link = item.select_one("a.result__a") or item.select_one("a[href]")
             if not link:
@@ -80,16 +73,6 @@ class DuckDuckGoProvider(SearchProvider):
                 results.append(SearchResult(title=title, url=href, snippet=snippet, provider=self.name))
             if len(results) >= limit:
                 break
-
-        if not results:
-            for link in soup.select("a[href]"):
-                title = link.get_text(" ", strip=True)
-                href = unwrap(link.get("href", ""))
-                if self._valid_result(title, href) and "duckduckgo.com" not in href:
-                    results.append(SearchResult(title=title, url=href, snippet="", provider=self.name))
-                if len(results) >= limit:
-                    break
-
         self._debug(query, len(results))
         return results
 
@@ -100,11 +83,11 @@ class BingProvider(SearchProvider):
     def search(self, query: str, limit: int) -> list[SearchResult]:
         endpoint = "https://www.bing.com/search"
         try:
-            response = self.session.get(endpoint, params={"q": query, "cc": "br", "setlang": "pt-BR"}, timeout=self.timeout)
-            self.last_status = f"{endpoint} -> HTTP {response.status_code} ({len(response.text)} bytes)"
+            response = self.session.get(endpoint, params={"q": query, "cc": "br", "setlang": "pt-BR"}, timeout=(3, self.timeout))
+            self.last_status = f"HTTP {response.status_code} ({len(response.text)} bytes)"
             response.raise_for_status()
         except Exception as exc:
-            self.last_status = f"{endpoint} -> erro: {exc}"
+            self.last_status = f"erro: {exc}"
             self._debug(query, 0)
             return []
 
@@ -136,17 +119,16 @@ class SearxProvider(SearchProvider):
 
     def search(self, query: str, limit: int) -> list[SearchResult]:
         if not self.base_url:
-            self.last_status = "RADAR_SEARX_URL não configurado"
-            self._debug(query, 0)
+            self.last_status = "não configurado"
             return []
         endpoint = f"{self.base_url}/search"
         try:
-            response = self.session.get(endpoint, params={"q": query, "format": "json", "language": "pt-BR"}, timeout=self.timeout)
-            self.last_status = f"{endpoint} -> HTTP {response.status_code} ({len(response.text)} bytes)"
+            response = self.session.get(endpoint, params={"q": query, "format": "json", "language": "pt-BR"}, timeout=(3, self.timeout))
+            self.last_status = f"HTTP {response.status_code} ({len(response.text)} bytes)"
             response.raise_for_status()
             data = response.json()
         except Exception as exc:
-            self.last_status = f"{endpoint} -> erro: {exc}"
+            self.last_status = f"erro: {exc}"
             self._debug(query, 0)
             return []
 
@@ -165,10 +147,11 @@ class SearxProvider(SearchProvider):
 
 
 class Fetcher:
-    def __init__(self, timeout: int = 20, sleep: float = 0.9, debug: bool = False):
-        self.timeout = timeout
-        self.sleep = sleep
+    def __init__(self, timeout: int = 6, sleep: float = 0.15, debug: bool = False):
+        self.timeout = int(os.getenv("RADAR_TIMEOUT", str(timeout)))
+        self.sleep = float(os.getenv("RADAR_SLEEP", str(sleep)))
         self.debug = debug
+        self.deep_fetch = os.getenv("RADAR_DEEP_FETCH", "0") == "1"
         self.last_status = ""
         self.session = requests.Session()
         self.session.headers.update({
@@ -177,16 +160,16 @@ class Fetcher:
             "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
         })
         self.providers: list[SearchProvider] = [
-            DuckDuckGoProvider(self.session, timeout, sleep, debug),
-            BingProvider(self.session, timeout, sleep, debug),
-            SearxProvider(self.session, timeout, sleep, debug, os.getenv("RADAR_SEARX_URL", "")),
+            DuckDuckGoProvider(self.session, self.timeout, self.sleep, debug),
+            BingProvider(self.session, self.timeout, self.sleep, debug),
+            SearxProvider(self.session, self.timeout, self.sleep, debug, os.getenv("RADAR_SEARX_URL", "")),
         ]
 
     def search(self, query: str, limit: int = 10) -> list[SearchResult]:
         seen: set[str] = set()
         merged: list[SearchResult] = []
         statuses: list[str] = []
-        per_provider_limit = max(limit, 5)
+        per_provider_limit = max(3, min(limit, 5))
 
         for provider in self.providers:
             results = provider.search(query, per_provider_limit)
@@ -205,8 +188,10 @@ class Fetcher:
         return merged
 
     def text(self, url: str) -> str:
+        if not self.deep_fetch:
+            return ""
         try:
-            response = self.session.get(url, timeout=self.timeout)
+            response = self.session.get(url, timeout=(3, self.timeout))
             if response.status_code >= 400:
                 return ""
             if "pdf" in response.headers.get("content-type", "").lower():
@@ -214,6 +199,6 @@ class Fetcher:
             soup = BeautifulSoup(response.text, "html.parser")
             for tag in soup(["script", "style", "noscript", "svg"]):
                 tag.decompose()
-            return soup.get_text(" ", strip=True)[:20000]
+            return soup.get_text(" ", strip=True)[:12000]
         except Exception:
             return ""
