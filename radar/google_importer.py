@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -213,8 +214,6 @@ BUSINESS_WORDS = (
     "company",
     "saúde",
     "saude",
-    "consultório",
-    "consultorio",
     "contabilidade",
     "advocacia",
     "escola",
@@ -222,6 +221,29 @@ BUSINESS_WORDS = (
     "colegio",
     "prórir",
     "prorir",
+)
+
+BAD_NAME_PREFIXES = (
+    "endereço",
+    "endereco",
+    "telefone",
+    "whatsapp",
+    "site",
+    "email",
+    "e-mail",
+    "horário",
+    "horario",
+    "como chegar",
+    "estamos localizados",
+    "estamos localizado",
+    "localizado",
+    "localizada",
+    "tratamentos disponíveis",
+    "tratamentos disponiveis",
+    "consultório dentário",
+    "consultorio dentario",
+    "consultório odontológico",
+    "consultorio odontologico",
 )
 
 
@@ -263,6 +285,21 @@ def _host(url: str) -> str:
         host = host[4:]
 
     return host
+
+
+def _url_path_key(url: str) -> str:
+    try:
+        parsed = urlparse(url or "")
+    except Exception:
+        return ""
+
+    path = re.sub(r"/+", "/", parsed.path or "").strip("/")
+
+    if not path:
+        return ""
+
+    path = path.split("?")[0].strip("/")
+    return path[:80]
 
 
 def _domain_label(url: str) -> str:
@@ -377,7 +414,6 @@ def _has_local_evidence(text: str, city: str, uf: str) -> bool:
         return True
 
     uf_n = _norm(uf)
-
     return bool(uf_n and re.search(rf"\b{re.escape(uf_n)}\b", text_n)) and "rio de janeiro" in text_n
 
 
@@ -394,20 +430,91 @@ def _is_noise_line(value: str) -> bool:
     if value_n in {_norm(item) for item in UI_NOISE}:
         return True
 
-    if len(value_n) > 220:
+    if len(value_n) > 260:
         return True
 
     return False
+
+
+def _is_bad_name(value: str) -> bool:
+    value = _line_clean(value)
+    value_n = _norm(value)
+
+    if not value_n:
+        return True
+
+    if value.startswith(("http://", "https://")):
+        return True
+
+    if re.search(r"\(\d{2}\)\s*\d", value):
+        return True
+
+    if any(value_n.startswith(_norm(prefix)) for prefix in BAD_NAME_PREFIXES):
+        return True
+
+    if value_n.startswith(("r. ", "rua ", "av. ", "avenida ", "estrada ", "rodovia ", "travessa ")):
+        return True
+
+    if len(value) > 95 and value.endswith("."):
+        return True
+
+    if value.count(",") >= 2 and not any(word in value_n for word in ("clínica", "clinica", "odonto", "odontologia", "company")):
+        return True
+
+    return False
+
+
+def _name_quality(value: str, city: str, segment: str, url: str = "") -> int:
+    value = _line_clean(value)
+    value_n = _norm(value)
+    host = _host(url)
+
+    if not value_n:
+        return -200
+
+    score = 0
+
+    if _is_bad_name(value):
+        score -= 120
+
+    if _has_any(value, _segment_terms(segment)):
+        score += 35
+
+    if any(word in value_n for word in BUSINESS_WORDS):
+        score += 25
+
+    if _has_any(value, _city_terms(city)):
+        score += 10
+
+    if 4 <= len(value) <= 70:
+        score += 20
+
+    if 70 < len(value) <= 95:
+        score += 5
+
+    if ":" in value:
+        score -= 20
+
+    if value.endswith("."):
+        score -= 25
+
+    if re.search(r"\b(rua|r\.|av\.|avenida|estrada|rodovia|travessa)\b", value_n):
+        score -= 35
+
+    if host and _domain_label(url) and _domain_label(url) in _slug(value):
+        score += 10
+
+    if "instagram.com" in host and re.search(r"^[A-Za-z0-9_.-]{3,40}$", value):
+        score -= 10
+
+    return score
 
 
 def _looks_like_business_name(value: str, city: str, segment: str) -> bool:
     value = _line_clean(value)
     value_n = _norm(value)
 
-    if _is_noise_line(value):
-        return False
-
-    if re.search(r"\(\d{2}\)\s*\d", value):
+    if _is_noise_line(value) or _is_bad_name(value):
         return False
 
     if len(value) < 4 or len(value) > 120:
@@ -425,6 +532,39 @@ def _looks_like_business_name(value: str, city: str, segment: str) -> bool:
     return False
 
 
+def _best_title_from_context(lines: list[str], url_index: int, city: str, segment: str, url: str) -> str:
+    before = lines[max(0, url_index - 7):url_index]
+    after = lines[url_index + 1:url_index + 4]
+    candidates = before + after
+    best = ""
+    best_score = -999
+
+    for line in candidates:
+        line = _line_clean(line)
+
+        if not line:
+            continue
+
+        if re.search(r"https?://", line):
+            continue
+
+        score = _name_quality(line, city, segment, url)
+
+        if score > best_score:
+            best_score = score
+            best = line
+
+    if best and best_score > -20:
+        return best
+
+    label = _domain_label(url)
+
+    if label:
+        return label
+
+    return url
+
+
 def _clean_title(value: str, url: str = "") -> str:
     value = _line_clean(value)
     value = re.sub(r"^(Facebook|Instagram|LinkedIn)\s*[-·:]+\s*", "", value, flags=re.I)
@@ -433,6 +573,15 @@ def _clean_title(value: str, url: str = "") -> str:
     value = re.sub(r"\s+·\s+.*$", "", value)
 
     host = _host(url)
+
+    if _is_bad_name(value):
+        label = _domain_label(url)
+        path_key = _url_path_key(url)
+
+        if "instagram.com" in host and path_key:
+            value = path_key.split("/")[0]
+        elif label:
+            value = label
 
     if host and _norm(value) in {"magé", "mage", "piabetá", "piabeta", "rj"}:
         value = _domain_label(url) or value
@@ -474,11 +623,16 @@ def lead_fingerprint(name: str, city: str, uf: str, url: str = "", phone: str = 
     city_s = _slug(city)
     uf_s = _slug(uf)
     host = _host(url)
+    path_key = _url_path_key(url)
     phone_d = _digits(phone)
     address_s = _slug(address)
 
     if phone_d and len(phone_d) >= 8:
         base = f"phone:{phone_d[-10:]}"
+    elif host and any(domain == host or host.endswith("." + domain) for domain in SOCIAL_DOMAINS):
+        base = f"social:{host}/{path_key or name_s}"
+    elif host and path_key and any(term in host for term in ("odontocompany", "doctoralia", "facebook", "instagram")):
+        base = f"url:{host}/{path_key}"
     elif host and not any(domain == host or host.endswith("." + domain) for domain in DIRECTORY_DOMAINS):
         base = f"domain:{host}"
     elif address_s:
@@ -496,6 +650,14 @@ def _score_candidate(candidate: Candidate, city: str, uf: str, segment: str) -> 
     score = 35
     reasons = ["google_importado"]
     tags = ["google_importado"]
+    name_quality = _name_quality(candidate.name, city, segment, candidate.url)
+
+    if name_quality >= 35:
+        score += 10
+        reasons.append("nome_bom")
+    elif name_quality < 0:
+        score -= 10
+        reasons.append("nome_fraco")
 
     if _has_local_evidence(text, city, uf):
         score += 30
@@ -556,6 +718,7 @@ def _candidate_to_lead(candidate: Candidate, city: str, uf: str, segment: str) -
     email = found_emails[0] if found_emails else ""
     address = _extract_address(text, city, uf)
     score, reasons, tags = _score_candidate(candidate, city, uf, segment)
+    name_quality = _name_quality(name, city, segment, candidate.url)
     fingerprint = lead_fingerprint(name, city, uf, candidate.url, phone, address)
 
     priority = "alta" if score >= 80 else "media" if score >= 60 else "baixa"
@@ -602,6 +765,7 @@ def _candidate_to_lead(candidate: Candidate, city: str, uf: str, segment: str) -
             "provider": "google_manual",
             "source_hint": candidate.source_hint,
             "quality_score": score,
+            "name_quality": name_quality,
             "fingerprint": fingerprint,
             "address": address,
         },
@@ -654,6 +818,9 @@ def _extract_html_candidates(raw: str, city: str, uf: str, segment: str) -> list
         if not _has_local_evidence(context, city, uf) and not _has_segment_evidence(context, segment):
             continue
 
+        if _is_bad_name(title):
+            title = _best_title_from_context(context.split(), 0, city, segment, href)
+
         candidates.append(Candidate(title, href, title, context[:700], "html_anchor"))
 
     return candidates
@@ -671,7 +838,7 @@ def _extract_url_candidates(text: str, city: str, segment: str) -> list[Candidat
         if not urls:
             continue
 
-        before = lines[max(0, index - 4):index]
+        before = lines[max(0, index - 7):index]
         after = lines[index + 1:index + 5]
         context = " ".join(before + [line] + after)
 
@@ -681,16 +848,7 @@ def _extract_url_candidates(text: str, city: str, segment: str) -> list[Candidat
             if not _is_usable_url(url):
                 continue
 
-            title = ""
-
-            for previous in reversed(before):
-                if _looks_like_business_name(previous, city, segment):
-                    title = previous
-                    break
-
-            if not title:
-                title = _domain_label(url) or url
-
+            title = _best_title_from_context(lines, index, city, segment, url)
             candidates.append(Candidate(title, url, title, context[:700], "texto_url"))
 
     return candidates
@@ -726,7 +884,8 @@ def _extract_line_candidates(text: str, city: str, uf: str, segment: str) -> lis
                 url = maybe_url
                 break
 
-        candidates.append(Candidate(line, url, line, context[:700], "texto_linha"))
+        title = _best_title_from_context(lines, index + window.index(line), city, segment, url) if url else line
+        candidates.append(Candidate(title, url, title, context[:700], "texto_linha"))
 
     return candidates
 
@@ -739,9 +898,23 @@ def _read_file(path: str | Path) -> tuple[str, bool]:
     return raw, is_html
 
 
+def _lead_sort_key(lead: Lead) -> tuple[int, int, int, int]:
+    raw = lead.raw if isinstance(lead.raw, dict) else {}
+
+    try:
+        name_quality = int(raw.get("name_quality", 0))
+    except Exception:
+        name_quality = 0
+
+    has_phone = 1 if lead.phone else 0
+    has_url = 1 if lead.url else 0
+
+    return lead.score, name_quality, has_phone, has_url
+
+
 def _dedupe_leads(leads: list[Lead]) -> list[Lead]:
-    seen: set[str] = set()
-    output: list[Lead] = []
+    best_by_fingerprint: dict[str, Lead] = {}
+    order: list[str] = []
 
     for lead in leads:
         fingerprint = str(lead.raw.get("fingerprint", "")) if isinstance(lead.raw, dict) else ""
@@ -749,13 +922,17 @@ def _dedupe_leads(leads: list[Lead]) -> list[Lead]:
         if not fingerprint:
             fingerprint = lead_fingerprint(lead.name, lead.city, lead.uf, lead.url, lead.phone, "")
 
-        if fingerprint in seen:
+        if fingerprint not in best_by_fingerprint:
+            best_by_fingerprint[fingerprint] = lead
+            order.append(fingerprint)
             continue
 
-        seen.add(fingerprint)
-        output.append(lead)
+        current = best_by_fingerprint[fingerprint]
 
-    return output
+        if _lead_sort_key(lead) > _lead_sort_key(current):
+            best_by_fingerprint[fingerprint] = lead
+
+    return [best_by_fingerprint[fingerprint] for fingerprint in order]
 
 
 def import_google_file(
@@ -778,7 +955,7 @@ def import_google_file(
     candidates.extend(_extract_url_candidates(text, city, segment))
     candidates.extend(_extract_line_candidates(text, city, uf, segment))
 
-    min_score = int(__import__("os").getenv("RADAR_GOOGLE_IMPORT_MIN_SCORE", "45"))
+    min_score = int(os.getenv("RADAR_GOOGLE_IMPORT_MIN_SCORE", "45"))
     leads: list[Lead] = []
 
     for candidate in candidates:
@@ -795,9 +972,12 @@ def import_google_file(
         leads.append(lead)
 
         if debug:
-            print(f"[google-import] lead score={lead.score}: {lead.name} -> {lead.url or 'sem_url'}")
+            print(f"[google-import] candidato score={lead.score}: {lead.name} -> {lead.url or 'sem_url'}")
 
-        if len(leads) >= limit:
-            break
+    deduped = _dedupe_leads(leads)[:limit]
 
-    return _dedupe_leads(leads)[:limit]
+    if debug:
+        print(f"[google-import] candidatos brutos: {len(leads)}")
+        print(f"[google-import] leads após fingerprint: {len(deduped)}")
+
+    return deduped
