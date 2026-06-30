@@ -177,6 +177,13 @@ SOCIAL_DOMAINS = (
     "linkedin.com",
 )
 
+BIG_BRAND_DOMAINS = (
+    "odontocompany.com",
+    "doctoralia.com.br",
+    "facebook.com",
+    "instagram.com",
+)
+
 UI_NOISE = (
     "fazer login",
     "login",
@@ -294,12 +301,7 @@ def _url_path_key(url: str) -> str:
         return ""
 
     path = re.sub(r"/+", "/", parsed.path or "").strip("/")
-
-    if not path:
-        return ""
-
-    path = path.split("?")[0].strip("/")
-    return path[:80]
+    return path[:100]
 
 
 def _domain_label(url: str) -> str:
@@ -325,15 +327,7 @@ def _unwrap_url(url: str) -> str:
     if not url:
         return ""
 
-    if url.startswith("/url?"):
-        parsed = urlparse(url)
-        query = parse_qs(parsed.query)
-        target = query.get("q") or query.get("url")
-
-        if target:
-            return unquote(target[0])
-
-    if "google.com/url?" in url:
+    if url.startswith("/url?") or "google.com/url?" in url:
         parsed = urlparse(url)
         query = parse_qs(parsed.query)
         target = query.get("q") or query.get("url")
@@ -504,9 +498,6 @@ def _name_quality(value: str, city: str, segment: str, url: str = "") -> int:
     if host and _domain_label(url) and _domain_label(url) in _slug(value):
         score += 10
 
-    if "instagram.com" in host and re.search(r"^[A-Za-z0-9_.-]{3,40}$", value):
-        score -= 10
-
     return score
 
 
@@ -530,39 +521,6 @@ def _looks_like_business_name(value: str, city: str, segment: str) -> bool:
         return True
 
     return False
-
-
-def _best_title_from_context(lines: list[str], url_index: int, city: str, segment: str, url: str) -> str:
-    before = lines[max(0, url_index - 7):url_index]
-    after = lines[url_index + 1:url_index + 4]
-    candidates = before + after
-    best = ""
-    best_score = -999
-
-    for line in candidates:
-        line = _line_clean(line)
-
-        if not line:
-            continue
-
-        if re.search(r"https?://", line):
-            continue
-
-        score = _name_quality(line, city, segment, url)
-
-        if score > best_score:
-            best_score = score
-            best = line
-
-    if best and best_score > -20:
-        return best
-
-    label = _domain_label(url)
-
-    if label:
-        return label
-
-    return url
 
 
 def _clean_title(value: str, url: str = "") -> str:
@@ -618,6 +576,106 @@ def _extract_address(text: str, city: str, uf: str) -> str:
     return ""
 
 
+def _urls_from_text(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    for raw_url in re.findall(r"https?://[^\s<>\"]+", text):
+        url = _unwrap_url(raw_url).rstrip(").,;")
+
+        if not _is_usable_url(url):
+            continue
+
+        if url in seen:
+            continue
+
+        seen.add(url)
+        urls.append(url)
+
+    return urls
+
+
+def _best_name_from_lines(lines: list[str], city: str, segment: str, url: str = "") -> str:
+    best = ""
+    best_score = -999
+
+    for index, line in enumerate(lines):
+        line = _line_clean(line)
+
+        if not line or re.search(r"https?://", line):
+            continue
+
+        score = _name_quality(line, city, segment, url)
+
+        if index == 0 and not _is_bad_name(line):
+            score += 20
+
+        if _looks_like_business_name(line, city, segment):
+            score += 20
+
+        if score > best_score:
+            best_score = score
+            best = line
+
+    if best and best_score > -20:
+        return best
+
+    if url:
+        host = _host(url)
+        path_key = _url_path_key(url)
+
+        if "instagram.com" in host and path_key:
+            return path_key.split("/")[0]
+
+        label = _domain_label(url)
+
+        if label:
+            return label
+
+    return "Empresa não identificada"
+
+
+def _split_blocks(text: str) -> list[list[str]]:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    raw_blocks = re.split(r"\n\s*\n+", text)
+    blocks: list[list[str]] = []
+
+    for raw_block in raw_blocks:
+        lines = [_line_clean(line) for line in raw_block.split("\n")]
+        lines = [line for line in lines if line]
+
+        if lines:
+            blocks.append(lines)
+
+    return blocks
+
+
+def _extract_block_candidates(text: str, city: str, uf: str, segment: str) -> list[Candidate]:
+    blocks = _split_blocks(text)
+    candidates: list[Candidate] = []
+
+    for block in blocks:
+        block_text = " ".join(block)
+        urls = _urls_from_text(block_text)
+
+        if not urls:
+            if not _has_local_evidence(block_text, city, uf) and not _has_segment_evidence(block_text, segment):
+                continue
+
+            name = _best_name_from_lines(block, city, segment)
+
+            if name and not _is_bad_name(name):
+                candidates.append(Candidate(name, "", name, block_text[:700], "texto_bloco_sem_url"))
+
+            continue
+
+        for url in urls:
+            name = _best_name_from_lines(block, city, segment, url)
+            candidates.append(Candidate(name, url, name, block_text[:700], "texto_bloco"))
+
+    return candidates
+
+
 def lead_fingerprint(name: str, city: str, uf: str, url: str = "", phone: str = "", address: str = "") -> str:
     name_s = _slug(name)
     city_s = _slug(city)
@@ -627,14 +685,14 @@ def lead_fingerprint(name: str, city: str, uf: str, url: str = "", phone: str = 
     phone_d = _digits(phone)
     address_s = _slug(address)
 
-    if phone_d and len(phone_d) >= 8:
-        base = f"phone:{phone_d[-10:]}"
-    elif host and any(domain == host or host.endswith("." + domain) for domain in SOCIAL_DOMAINS):
+    if host and any(domain == host or host.endswith("." + domain) for domain in SOCIAL_DOMAINS):
         base = f"social:{host}/{path_key or name_s}"
-    elif host and path_key and any(term in host for term in ("odontocompany", "doctoralia", "facebook", "instagram")):
+    elif host and any(term == host or host.endswith("." + term) for term in BIG_BRAND_DOMAINS) and path_key:
         base = f"url:{host}/{path_key}"
     elif host and not any(domain == host or host.endswith("." + domain) for domain in DIRECTORY_DOMAINS):
         base = f"domain:{host}"
+    elif phone_d and len(phone_d) >= 8:
+        base = f"phone:{phone_d[-10:]}"
     elif address_s:
         base = f"addr:{name_s}|{address_s}|{city_s}|{uf_s}"
     else:
@@ -819,7 +877,7 @@ def _extract_html_candidates(raw: str, city: str, uf: str, segment: str) -> list
             continue
 
         if _is_bad_name(title):
-            title = _best_title_from_context(context.split(), 0, city, segment, href)
+            title = _best_name_from_lines(context.split(" | "), city, segment, href)
 
         candidates.append(Candidate(title, href, title, context[:700], "html_anchor"))
 
@@ -838,9 +896,10 @@ def _extract_url_candidates(text: str, city: str, segment: str) -> list[Candidat
         if not urls:
             continue
 
-        before = lines[max(0, index - 7):index]
-        after = lines[index + 1:index + 5]
-        context = " ".join(before + [line] + after)
+        before = lines[max(0, index - 4):index]
+        after = lines[index + 1:index + 4]
+        context_lines = before + [line] + after
+        context = " ".join(context_lines)
 
         for raw_url in urls:
             url = _unwrap_url(raw_url).rstrip(").,;")
@@ -848,8 +907,8 @@ def _extract_url_candidates(text: str, city: str, segment: str) -> list[Candidat
             if not _is_usable_url(url):
                 continue
 
-            title = _best_title_from_context(lines, index, city, segment, url)
-            candidates.append(Candidate(title, url, title, context[:700], "texto_url"))
+            name = _best_name_from_lines(context_lines, city, segment, url)
+            candidates.append(Candidate(name, url, name, context[:700], "texto_url_fallback"))
 
     return candidates
 
@@ -863,29 +922,13 @@ def _extract_line_candidates(text: str, city: str, uf: str, segment: str) -> lis
         if not _looks_like_business_name(line, city, segment):
             continue
 
-        before = lines[max(0, index - 2):index]
-        window = lines[index:index + 7]
-        context = " ".join(before + window)
+        window = lines[index:index + 5]
+        context = " ".join(window)
 
         if not _has_local_evidence(context, city, uf) and not _has_segment_evidence(context, segment):
             continue
 
-        url = ""
-
-        for item in window:
-            match = re.search(r"https?://[^\s<>\"]+", item)
-
-            if not match:
-                continue
-
-            maybe_url = _unwrap_url(match.group(0).rstrip(").,;"))
-
-            if _is_usable_url(maybe_url):
-                url = maybe_url
-                break
-
-        title = _best_title_from_context(lines, index + window.index(line), city, segment, url) if url else line
-        candidates.append(Candidate(title, url, title, context[:700], "texto_linha"))
+        candidates.append(Candidate(line, "", line, context[:700], "texto_linha_fallback"))
 
     return candidates
 
@@ -947,13 +990,17 @@ def import_google_file(
     candidates: list[Candidate] = []
 
     if is_html:
-        candidates.extend(_extract_html_candidates(raw, city, uf, segment))
         text = _html_to_text(raw)
+        candidates.extend(_extract_html_candidates(raw, city, uf, segment))
     else:
         text = raw
 
-    candidates.extend(_extract_url_candidates(text, city, segment))
-    candidates.extend(_extract_line_candidates(text, city, uf, segment))
+    block_candidates = _extract_block_candidates(text, city, uf, segment)
+    candidates.extend(block_candidates)
+
+    if not block_candidates:
+        candidates.extend(_extract_url_candidates(text, city, segment))
+        candidates.extend(_extract_line_candidates(text, city, uf, segment))
 
     min_score = int(os.getenv("RADAR_GOOGLE_IMPORT_MIN_SCORE", "45"))
     leads: list[Lead] = []
