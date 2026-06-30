@@ -13,7 +13,7 @@ def main():
     sub.add_parser("sources")
 
     p = sub.add_parser("search-test")
-    p.add_argument("query")
+    p.add_argument("query", nargs="+", help="Query de busca. Pode vir quebrada em várias palavras.")
     p.add_argument("--limit", type=int, default=5)
 
     p = sub.add_parser("prospectar")
@@ -51,11 +51,13 @@ def main():
         for source in DEFAULT_SOURCES:
             print(f"- {source}")
     elif args.cmd == "search-test":
+        query = " ".join(args.query)
         fetcher = Fetcher(debug=True)
-        results = fetcher.search(args.query, args.limit)
+        results = fetcher.search(query, args.limit)
+        print(f"Query usada: {query}")
         print(f"Resultados encontrados: {len(results)}")
         for index, result in enumerate(results, 1):
-            print(f"{index}. {result.title}\n   {result.url}\n   {result.snippet[:180]}")
+            print(f"{index}. [{result.provider}] {result.title}\n   {result.url}\n   {result.snippet[:180]}")
     elif args.cmd == "prospectar":
         sources = args.sources.split(",") if args.sources else None
         raw, final, count = run_and_export(args.cidade, args.uf, sources, args.por_fonte, args.fila, args.ia, args.debug)
