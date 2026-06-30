@@ -6,7 +6,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -50,6 +50,8 @@ class SearchProvider:
             "duckduckgo.com",
             "go.microsoft.com",
             "support.microsoft.com",
+            "search.yahoo.com",
+            "mojeek.com/search",
         )
         blocked_schemes = ("javascript:", "mailto:")
         low = href.lower()
@@ -76,10 +78,40 @@ def _unwrap_bing_url(href: str) -> str:
     return href
 
 
+def _unwrap_yahoo_url(href: str) -> str:
+    href = unwrap(href or "")
+    parsed = urlparse(href)
+    qs = parse_qs(parsed.query)
+    for key in ("RU", "u", "url"):
+        if key in qs and qs[key]:
+            candidate = unquote(qs[key][0])
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+    return href
+
+
 def _strip_html(value: str) -> str:
     if not value:
         return ""
     return BeautifulSoup(html.unescape(value), "html.parser").get_text(" ", strip=True)
+
+
+def _parse_rss_items(xml_bytes: bytes, provider: str, limit: int, validator, unwrap_url=lambda x: x) -> list[SearchResult]:
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return []
+    results: list[SearchResult] = []
+    for item in root.findall(".//item"):
+        title = _strip_html(item.findtext("title", ""))
+        link = item.findtext("link", "") or ""
+        snippet = _strip_html(item.findtext("description", ""))
+        href = unwrap_url(link)
+        if validator(title, href):
+            results.append(SearchResult(title=title, url=href, snippet=snippet, provider=provider))
+        if len(results) >= limit:
+            break
+    return results
 
 
 class DuckDuckGoProvider(SearchProvider):
@@ -140,23 +172,9 @@ class BingProvider(SearchProvider):
         except Exception as exc:
             self.last_status = f"RSS erro: {exc}"
             return []
-
-        try:
-            root = ET.fromstring(response.content)
-        except ET.ParseError as exc:
-            self.last_status = f"RSS parse erro: {exc} ({len(response.text)} bytes)"
-            return []
-
-        results: list[SearchResult] = []
-        for item in root.findall(".//item"):
-            title = _strip_html(item.findtext("title", ""))
-            link = item.findtext("link", "") or ""
-            snippet = _strip_html(item.findtext("description", ""))
-            href = _unwrap_bing_url(link)
-            if self._valid_result(title, href):
-                results.append(SearchResult(title=title, url=href, snippet=snippet, provider=self.name))
-            if len(results) >= limit:
-                break
+        results = _parse_rss_items(response.content, self.name, limit, self._valid_result, _unwrap_bing_url)
+        if not results and response.text:
+            self.last_status = f"RSS sem itens ({len(response.text)} bytes)"
         return results
 
     def _search_html(self, query: str, limit: int) -> list[SearchResult]:
@@ -182,7 +200,6 @@ class BingProvider(SearchProvider):
 
         if not results:
             results = self._fallback_links(soup, limit)
-
         return results
 
     def _parse_bing_item(self, item) -> SearchResult | None:
@@ -216,6 +233,96 @@ class BingProvider(SearchProvider):
             results.append(SearchResult(title=title[:160], url=href, snippet="", provider=self.name))
             if len(results) >= limit:
                 break
+        return results
+
+
+class YahooProvider(SearchProvider):
+    name = "yahoo"
+
+    def search(self, query: str, limit: int) -> list[SearchResult]:
+        results = self._search_rss(query, limit)
+        if results:
+            self._debug(query, len(results))
+            return results
+        results = self._search_html(query, limit)
+        self._debug(query, len(results))
+        return results
+
+    def _search_rss(self, query: str, limit: int) -> list[SearchResult]:
+        endpoint = "https://search.yahoo.com/rss"
+        try:
+            response = self.session.get(endpoint, params={"p": query}, timeout=self.timeout)
+            self.last_status = f"RSS HTTP {response.status_code} ({len(response.text)} bytes)"
+            response.raise_for_status()
+        except Exception as exc:
+            self.last_status = f"RSS erro: {exc}"
+            return []
+        return _parse_rss_items(response.content, self.name, limit, self._valid_result, _unwrap_yahoo_url)
+
+    def _search_html(self, query: str, limit: int) -> list[SearchResult]:
+        endpoint = "https://search.yahoo.com/search"
+        try:
+            response = self.session.get(endpoint, params={"p": query}, timeout=self.timeout)
+            self.last_status = f"HTML HTTP {response.status_code} ({len(response.text)} bytes)"
+            response.raise_for_status()
+        except Exception as exc:
+            self.last_status = f"HTML erro: {exc}"
+            return []
+        soup = BeautifulSoup(response.text, "html.parser")
+        results: list[SearchResult] = []
+        seen: set[str] = set()
+        for item in soup.select("div#web li, .algo, .dd"):
+            link = item.select_one("h3 a[href]") or item.select_one("a[href]")
+            if not link:
+                continue
+            title = link.get_text(" ", strip=True)
+            href = _unwrap_yahoo_url(link.get("href", ""))
+            snippet_el = item.select_one(".compText, .fc-falcon, p")
+            snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+            key = href.split("#", 1)[0].rstrip("/").lower()
+            if key in seen or not self._valid_result(title, href):
+                continue
+            seen.add(key)
+            results.append(SearchResult(title=title, url=href, snippet=snippet, provider=self.name))
+            if len(results) >= limit:
+                break
+        return results
+
+
+class MojeekProvider(SearchProvider):
+    name = "mojeek"
+
+    def search(self, query: str, limit: int) -> list[SearchResult]:
+        endpoint = "https://www.mojeek.com/search"
+        try:
+            response = self.session.get(endpoint, params={"q": query}, timeout=self.timeout)
+            self.last_status = f"HTTP {response.status_code} ({len(response.text)} bytes)"
+            response.raise_for_status()
+        except Exception as exc:
+            self.last_status = f"erro: {exc}"
+            self._debug(query, 0)
+            return []
+        soup = BeautifulSoup(response.text, "html.parser")
+        results: list[SearchResult] = []
+        seen: set[str] = set()
+        for item in soup.select("li, .result, .results-standard .r"):
+            link = item.select_one("h2 a[href], h3 a[href], a[href]")
+            if not link:
+                continue
+            title = link.get_text(" ", strip=True)
+            href = unwrap(link.get("href", ""))
+            if href.startswith("/"):
+                href = "https://www.mojeek.com" + href
+            snippet_el = item.select_one("p, .s, .desc")
+            snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+            key = href.split("#", 1)[0].rstrip("/").lower()
+            if key in seen or not self._valid_result(title, href):
+                continue
+            seen.add(key)
+            results.append(SearchResult(title=title[:160], url=href, snippet=snippet[:500], provider=self.name))
+            if len(results) >= limit:
+                break
+        self._debug(query, len(results))
         return results
 
 
@@ -262,7 +369,7 @@ class Fetcher:
         self.sleep = float(os.getenv("RADAR_SLEEP", str(sleep)))
         self.debug = debug
         self.deep_fetch = os.getenv("RADAR_DEEP_FETCH", "0") == "1"
-        provider_names = [p.strip().lower() for p in os.getenv("RADAR_PROVIDERS", "bing,duckduckgo,searxng").split(",") if p.strip()]
+        provider_names = [p.strip().lower() for p in os.getenv("RADAR_PROVIDERS", "bing,yahoo,mojeek,duckduckgo,searxng").split(",") if p.strip()]
         self.last_status = ""
         self.session = requests.Session()
         self.session.headers.update({
@@ -273,6 +380,8 @@ class Fetcher:
         available: dict[str, SearchProvider] = {
             "duckduckgo": DuckDuckGoProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
             "bing": BingProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
+            "yahoo": YahooProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
+            "mojeek": MojeekProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug),
             "searxng": SearxProvider(self.session, self.connect_timeout, self.timeout, self.sleep, debug, os.getenv("RADAR_SEARX_URL", "")),
         }
         self.providers = [available[name] for name in provider_names if name in available]
