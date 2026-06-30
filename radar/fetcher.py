@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
-from urllib.parse import unwrap as _noop
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -36,12 +37,36 @@ class SearchProvider:
     def _valid_result(self, title: str, href: str) -> bool:
         if not title or not href.startswith(("http://", "https://")):
             return False
-        blocked = ("javascript:", "mailto:")
-        return not any(value in href for value in blocked)
+        blocked_domains = (
+            "bing.com",
+            "microsoft.com",
+            "duckduckgo.com",
+            "go.microsoft.com",
+            "support.microsoft.com",
+        )
+        blocked_schemes = ("javascript:", "mailto:")
+        low = href.lower()
+        if any(low.startswith(value) for value in blocked_schemes):
+            return False
+        return not any(domain in low for domain in blocked_domains)
 
     def _debug(self, query: str, count: int) -> None:
         if self.debug:
             print(f"[debug-search:{self.name}] {self.last_status} | resultados={count} | {query[:90]!r}")
+
+
+def _unwrap_bing_url(href: str) -> str:
+    href = unwrap(href or "")
+    parsed = urlparse(href)
+    qs = parse_qs(parsed.query)
+    for key in ("u", "url", "r"):
+        if key in qs and qs[key]:
+            candidate = unquote(qs[key][0])
+            if candidate.startswith("a1"):
+                candidate = candidate[2:]
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+    return href
 
 
 class DuckDuckGoProvider(SearchProvider):
@@ -69,7 +94,7 @@ class DuckDuckGoProvider(SearchProvider):
             href = unwrap(link.get("href", ""))
             snippet_el = item.select_one(".result__snippet") or item.select_one(".result__body")
             snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
-            if self._valid_result(title, href) and "duckduckgo.com" not in href:
+            if self._valid_result(title, href):
                 results.append(SearchResult(title=title, url=href, snippet=snippet, provider=self.name))
             if len(results) >= limit:
                 break
@@ -94,19 +119,51 @@ class BingProvider(SearchProvider):
         time.sleep(self.sleep)
         soup = BeautifulSoup(response.text, "html.parser")
         results: list[SearchResult] = []
-        for item in soup.select("li.b_algo"):
-            link = item.select_one("h2 a[href]") or item.select_one("a[href]")
-            if not link:
-                continue
-            title = link.get_text(" ", strip=True)
-            href = unwrap(link.get("href", ""))
-            snippet_el = item.select_one(".b_caption p") or item.select_one("p")
-            snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
-            if self._valid_result(title, href) and "bing.com" not in href:
-                results.append(SearchResult(title=title, url=href, snippet=snippet, provider=self.name))
+
+        for item in soup.select("li.b_algo, .b_algo, .b_results li"):
+            parsed = self._parse_bing_item(item)
+            if parsed:
+                results.append(parsed)
             if len(results) >= limit:
                 break
+
+        if not results:
+            results = self._fallback_links(soup, limit)
+
         self._debug(query, len(results))
+        return results
+
+    def _parse_bing_item(self, item) -> SearchResult | None:
+        link = item.select_one("h2 a[href]") or item.select_one("a[href]")
+        if not link:
+            return None
+        title = link.get_text(" ", strip=True)
+        href = _unwrap_bing_url(link.get("href", ""))
+        snippet_el = item.select_one(".b_caption p") or item.select_one("p")
+        snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+        if self._valid_result(title, href):
+            return SearchResult(title=title, url=href, snippet=snippet, provider=self.name)
+        return None
+
+    def _fallback_links(self, soup: BeautifulSoup, limit: int) -> list[SearchResult]:
+        results: list[SearchResult] = []
+        seen: set[str] = set()
+        for link in soup.select("a[href]"):
+            title = link.get_text(" ", strip=True)
+            href = _unwrap_bing_url(link.get("href", ""))
+            if not self._valid_result(title, href):
+                continue
+            if len(title) < 4:
+                continue
+            if re.search(r"^(imagens|videos|noticias|maps|shopping|entrar|configura)", title, re.I):
+                continue
+            key = href.split("#", 1)[0].rstrip("/").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(SearchResult(title=title[:160], url=href, snippet="", provider=self.name))
+            if len(results) >= limit:
+                break
         return results
 
 
