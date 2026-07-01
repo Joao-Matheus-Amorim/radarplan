@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -6,6 +6,8 @@ import json
 import os
 import re
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -223,7 +225,7 @@ def _result_to_lead(result: SearchResult, cidade: str, uf: str, segmento: str) -
         score=score,
         priority=priority,
         reason=reason,
-        approach="Validar o lead do Google e abordar como empresa local com possível demanda por plano/benefício.",
+        approach="Validar prospecto do Google e abordar como empresa local com possível demanda por plano/benefício.",
         tags=[
             "google_browser",
             segmento,
@@ -266,6 +268,75 @@ def _dedupe(leads: list[Lead]) -> list[Lead]:
             best[key] = lead
 
     return [best[key] for key in order]
+
+
+def _lead_to_admin_prospect(lead: Lead, query: str) -> dict:
+    fingerprint = ""
+    if isinstance(lead.raw, dict):
+        fingerprint = str(lead.raw.get("fingerprint", ""))
+
+    return {
+        "nome_empresa": lead.name,
+        "segmento": lead.segment,
+        "cidade": lead.city,
+        "uf": lead.uf,
+        "telefone_publico": lead.phone,
+        "whatsapp": lead.whatsapp,
+        "email_publico": lead.email,
+        "site_url": lead.url,
+        "fonte_url": lead.url,
+        "consulta_google": query,
+        "origem": "radarplan_google_browser",
+        "score": lead.score,
+        "prioridade": lead.priority,
+        "score_motivos": lead.reason,
+        "abordagem": lead.approach,
+        "evidencias": lead.evidence,
+        "tags": lead.tags,
+        "fingerprint": fingerprint,
+        "raw": lead.raw,
+    }
+
+
+def _post_to_admin(args: argparse.Namespace, leads: list[Lead], query: str) -> None:
+    admin_url = (args.admin_url or os.environ.get("RADAR_ADMIN_URL") or "").rstrip("/")
+    import_secret = args.import_secret or os.environ.get("RADAR_IMPORT_SECRET") or ""
+
+    if not admin_url:
+        return
+
+    if not import_secret:
+        print("[admin-radar] RADAR_IMPORT_SECRET ausente. Pulando envio automático.")
+        return
+
+    payload = {
+        "source": "radarplan",
+        "city": args.cidade,
+        "uf": args.uf,
+        "segment": args.segmento,
+        "query": query,
+        "prospects": [_lead_to_admin_prospect(lead, query) for lead in leads],
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        f"{admin_url}/api/radar?action=import",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "X-Radar-Secret": import_secret,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            print(f"[admin-radar] enviado: HTTP {response.status} {body}")
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        print(f"[admin-radar] falha HTTP {error.code}: {detail}")
+    except Exception as error:
+        print(f"[admin-radar] falha ao enviar: {error}")
 
 
 def _cache_path(query: str, limit: int) -> Path:
@@ -385,12 +456,13 @@ def run(args: argparse.Namespace) -> int:
     fila.parent.mkdir(parents=True, exist_ok=True)
     export_csv(fila_leads[: args.fila_limite], fila)
 
+    if args.sync_admin or args.admin_url or os.environ.get("RADAR_ADMIN_URL"):
+        _post_to_admin(args, fila_leads[: args.fila_limite], queries[0] if queries else args.query)
+
     print(f"Resultados Google: {len(all_results)}")
     print(f"Leads únicos: {len(leads)}")
     print(f"CSV: {saida}")
     print(f"Fila: {fila}")
-
-    fila_leads = [lead for lead in leads if not _is_directory(lead.url)]
 
     for i, lead in enumerate(fila_leads[: args.fila_limite], start=1):
         print("")
@@ -407,7 +479,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prospecta leads via Google Browser em modo lento/cacheado.")
+    parser = argparse.ArgumentParser(description="Prospecta prospectos via Google Browser em modo lento/cacheado.")
     parser.add_argument("--cidade", required=True)
     parser.add_argument("--uf", default="RJ")
     parser.add_argument("--segmento", required=True)
@@ -420,6 +492,9 @@ def main() -> None:
     parser.add_argument("--extra", action="store_true", help="Faz queries extras. Use com cuidado para não chamar captcha.")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--sync-admin", action="store_true", help="Envia a fila de prospectos para o admin da landing.")
+    parser.add_argument("--admin-url", default="", help="URL da landing/admin. Também pode usar RADAR_ADMIN_URL.")
+    parser.add_argument("--import-secret", default="", help="Segredo de importação. Também pode usar RADAR_IMPORT_SECRET.")
 
     args = parser.parse_args()
     raise SystemExit(run(args))
