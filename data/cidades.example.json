@@ -1,0 +1,56 @@
+{
+  "praças": [
+    {
+      "cidade": "Piabetá",
+      "uf": "RJ",
+      "populacao": 18000,
+      "segmentos_alvo": [
+        "odontologia",
+        "clinica medica",
+        "comercio",
+        "escritorio contabil"
+      ],
+      "cnae_prioritarios": [
+        "86",
+        "69",
+        "47",
+        "85"
+      ],
+      "ativo": true
+    },
+    {
+      "cidade": "Magé",
+      "uf": "RJ",
+      "populacao": 230000,
+      "segmentos_alvo": [
+        "saude",
+        "educacao",
+        "comercio",
+        "industria"
+      ],
+      "cnae_prioritarios": [
+        "86",
+        "85",
+        "47",
+        "10"
+      ],
+      "ativo": true
+    },
+    {
+      "cidade": "Guapimirim",
+      "uf": "RJ",
+      "populacao": 55000,
+      "segmentos_alvo": [
+        "saude",
+        "comercio",
+        "servicos"
+      ],
+      "cnae_prioritarios": [
+        "86",
+        "47",
+        "56"
+      ],
+      "ativo": true
+    }
+  ]
+}
